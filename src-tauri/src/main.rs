@@ -7,6 +7,7 @@ mod flasher;
 mod hexio;
 mod serialsrv;
 mod settings;
+mod usbenum;
 
 use flasher::FlashState;
 use serialsrv::AppState;

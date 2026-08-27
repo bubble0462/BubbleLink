@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { api, type PacketEvent, type PortEntry, type SerialDataEvent } from "../api";
+import { api, onEvent, subscribeAll, type PacketEvent, type PortEntry, type SerialDataEvent } from "../api";
 import { CountUp, Dropdown, RefreshButton, Spinner, Toast } from "../components/fx";
 import RulesPanel from "../components/RulesPanel";
 import TerminalView, { type TermLine } from "../components/TerminalView";
@@ -39,9 +39,11 @@ function fmtBytes(n: number): string {
 
 interface Props {
   onConnChange: (label: string | null) => void;
+  /** 当前是否为激活页（页面常驻挂载，仅切换显示，保证串口/录制状态不丢） */
+  active: boolean;
 }
 
-export default function SerialPage({ onConnChange }: Props) {
+export default function SerialPage({ onConnChange, active }: Props) {
   // ---- 连接相关 ----
   const [ports, setPorts] = useState<PortEntry[]>([]);
   const [port, setPort] = useState("");
@@ -154,34 +156,29 @@ export default function SerialPage({ onConnChange }: Props) {
 
   // ---- 事件订阅 ----
   useEffect(() => {
-    let offData: (() => void) | undefined;
-    let offErr: (() => void) | undefined;
-    let alive = true;
-
-    import("@tauri-apps/api/event").then(async ({ listen }) => {
-      if (!alive) return;
-      offData = await listen<SerialDataEvent>("serial-data", (ev) => {
-        pendingRef.current.push(...ev.payload.packets);
-      });
-      offErr = await listen<{ port: string; message: string }>("serial-error", (ev) => {
+    const sub = subscribeAll([
+      onEvent<SerialDataEvent>("serial-data", (pl) => {
+        pendingRef.current.push(...pl.packets);
+      }),
+      onEvent<{ port: string; message: string }>("serial-error", (pl) => {
         linesRef.current.push({
           ts: Date.now(),
           bytes: new Uint8Array(0),
-          sys: ev.payload.message,
+          sys: pl.message,
         });
         forceTick();
         if (connRef.current) {
           api.closePort().catch(() => {});
           setConnected(false);
         }
-      });
-    });
-    return () => {
-      alive = false;
-      offData?.();
-      offErr?.();
-    };
-  }, [forceTick]);
+      }),
+      onEvent<{ message: string }>("capture-error", (pl) => {
+        setCapPath(null);
+        showToast(`录制出错，已停止：${pl.message}`);
+      }),
+    ]);
+    return sub.cancel;
+  }, [forceTick, showToast]);
 
   // ---- 端口列表 ----
   const [refreshing, setRefreshing] = useState(false);
@@ -199,14 +196,14 @@ export default function SerialPage({ onConnChange }: Props) {
     await refreshPorts();
     setRefreshing(false);
   }, [refreshPorts]);
+  // 端口列表：页面可见时立即刷新并按 2.5s 轮询；隐藏页不空转
   useEffect(() => {
-    refreshPorts();
-  }, [refreshPorts]);
-  useEffect(() => {
+    if (!active) return;
+    void refreshPorts();
     if (connected) return;
     const t = setInterval(refreshPorts, 2500);
     return () => clearInterval(t);
-  }, [connected, refreshPorts]);
+  }, [active, connected, refreshPorts]);
 
   // ---- 连接 / 断开 ----
   const connect = async () => {
@@ -384,14 +381,14 @@ export default function SerialPage({ onConnChange }: Props) {
     }, 400);
   }, [port, baud, gapMs, encoding, hexDisplay, showLen, hexSend, crlf, timerMs, rules]);
 
-  // ---- 派生显示数据 ----
-  const viewLines = useMemo(() => linesRef.current, [tick]);
+  // ---- 派生显示数据（必须每次产出新数组引用，TerminalView 以引用变化为重算依据） ----
+  const viewLines = useMemo(() => linesRef.current.slice(-1500), [tick]);
 
   const portDesc = ports.find((p) => p.name === port)?.friendly ?? "";
   const s = statsRef.current;
 
   return (
-    <main className="page page-serial active">
+    <main className={`page page-serial${active ? " active" : ""}`}>
 
       {/* 工具条 */}
       <div className="card ser-toolbar">

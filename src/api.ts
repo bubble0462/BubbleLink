@@ -1,5 +1,9 @@
 /** Tauri IPC 封装：本应用唯一的后端出入口。 */
 
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import type { UnlistenFn } from "@tauri-apps/api/event";
+
 export interface PortEntry {
   name: string;
   friendly: string;
@@ -60,8 +64,40 @@ function hasTauri(): boolean {
 
 async function ipc<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   if (!hasTauri()) throw new Error("请在 BubbleLink Studio 桌面应用中运行");
-  const core = await import("@tauri-apps/api/core");
-  return core.invoke<T>(cmd, args);
+  return invoke<T>(cmd, args);
+}
+
+/** 订阅后端事件，resolve 为取消订阅函数。 */
+export function onEvent<T>(name: string, handler: (payload: T) => void): Promise<UnlistenFn> {
+  if (!hasTauri()) {
+    return Promise.reject(new Error("请在 BubbleLink Studio 桌面应用中运行"));
+  }
+  return listen<T>(name, (ev) => handler(ev.payload));
+}
+
+/** 批量订阅帮助器：统一处理异步竞态——unmount 后才 resolve 的订阅立即被撤销。 */
+export function subscribeAll(
+  subs: Array<Promise<UnlistenFn>>,
+): { cancel: () => void } {
+  let alive = true;
+  const offs: UnlistenFn[] = [];
+  for (const p of subs) {
+    p.then(
+      (off) => {
+        if (alive) offs.push(off);
+        else off();
+      },
+      () => {
+        /* 桌面外环境 */
+      },
+    );
+  }
+  return {
+    cancel: () => {
+      alive = false;
+      offs.forEach((o) => o());
+    },
+  };
 }
 
 export const api = {

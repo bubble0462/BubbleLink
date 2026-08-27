@@ -24,6 +24,10 @@ const MAX_PKT_BYTES: usize = 16384;
 /// emit 批量窗口（毫秒）：事件频率上限 20/s，前端渲染压力恒定。
 const EMIT_WINDOW_MS: u64 = 50;
 const READ_POLL_MS: u64 = 15;
+/// 待写队列深度：防止"定时发送速率 > 设备实际收数速率"时内存无限增长。
+const WRITE_QUEUE_CAP: usize = 1024;
+/// 落盘刷盘间隔（毫秒）：批量写 + 周期 flush，兼顾性能与断电丢失上限。
+const CAPTURE_FLUSH_MS: u64 = 250;
 
 // ---------------------------------------------------------------------------
 // 端口枚举
@@ -61,25 +65,26 @@ fn windows_friendly_names() -> HashMap<String, String> {
     use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
     use winreg::RegKey;
 
+    // 只扫 USB 子树（2.5s 一次轮询，全树递归代价太高）：
+    // USB\VID_xxxx&PID_yyyy\<实例>\Device Parameters\PortName
     let mut map = HashMap::new();
     let hk = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let Ok(enum_root) = hk.open_subkey_with_flags(r"SYSTEM\CurrentControlSet\Enum", KEY_READ) else {
+    let Ok(usb_root) =
+        hk.open_subkey_with_flags(r"SYSTEM\CurrentControlSet\Enum\USB", KEY_READ)
+    else {
         return map;
     };
-    for bus in enum_root.enum_keys().flatten() {
-        let Ok(busk) = enum_root.open_subkey_with_flags(&bus, KEY_READ) else { continue };
-        for dev in busk.enum_keys().flatten() {
-            let Ok(devk) = busk.open_subkey_with_flags(&dev, KEY_READ) else { continue };
-            for inst in devk.enum_keys().flatten() {
-                let Ok(instk) = devk.open_subkey_with_flags(&inst, KEY_READ) else { continue };
-                let Ok(dp) = instk.open_subkey_with_flags("Device Parameters", KEY_READ)
-                else {
-                    continue;
-                };
-                let Ok::<String, _>(port) = dp.get_value("PortName") else { continue };
-                if let Ok::<String, _>(f) = instk.get_value("FriendlyName") {
-                    map.insert(port, f);
-                }
+    for dev in usb_root.enum_keys().flatten() {
+        let Ok(devk) = usb_root.open_subkey_with_flags(&dev, KEY_READ) else { continue };
+        for inst in devk.enum_keys().flatten() {
+            let Ok(instk) = devk.open_subkey_with_flags(&inst, KEY_READ) else { continue };
+            let Ok(dp) = instk.open_subkey_with_flags("Device Parameters", KEY_READ)
+            else {
+                continue;
+            };
+            let Ok::<String, _>(port) = dp.get_value("PortName") else { continue };
+            if let Ok::<String, _>(f) = instk.get_value("FriendlyName") {
+                map.insert(port, f);
             }
         }
     }
@@ -96,7 +101,7 @@ fn windows_friendly_names() -> HashMap<String, String> {
 // ---------------------------------------------------------------------------
 
 pub struct SessionGuard {
-    writer: mpsc::Sender<Vec<u8>>,
+    writer: mpsc::SyncSender<Vec<u8>>,
     cancel: Arc<AtomicBool>,
 }
 
@@ -158,7 +163,8 @@ pub fn open_port(
         .map_err(|e| format!("打开 {name} 失败：{e}"))?;
 
     let cancel = Arc::new(AtomicBool::new(false));
-    let (tx_write, rx_write) = mpsc::channel::<Vec<u8>>();
+    let (tx_write, rx_write) = mpsc::sync_channel::<Vec<u8>>(WRITE_QUEUE_CAP); // 写队列有界：设备收不过来时让前端立刻得到"队列繁忙"，而不是无限堆积
+    // 读方向保持无界：聚合线程只做切包与非阻塞 emit，消费速度远高于到达速度
     let (tx_data, rx_data) = mpsc::channel::<(Instant, Vec<u8>)>();
 
     // 端口读写循环线程（独占串口所有权）
@@ -168,7 +174,11 @@ pub fn open_port(
     let err_app = app.clone();
     let err_name = name.to_string();
     let reader = std::thread::spawn(move || {
-        run_port_loop(port, tx_data, rx_write, rd_cancel, rd_dtr, rd_rts, &err_app, &err_name);
+        run_port_loop(
+            PortLoopCtx { port, tx_data, rx_write, cancel: rd_cancel, dtr_want: rd_dtr, rts_want: rd_rts },
+            &err_app,
+            &err_name,
+        );
     });
 
     // 分包聚合线程
@@ -210,8 +220,13 @@ pub fn send_bytes(state: &AppState, data: &[u8]) -> Result<usize, String> {
     let Some(s) = guard.as_ref() else {
         return Err("串口未连接".into());
     };
-    s.writer.send(data.to_vec()).map_err(|_| "串口已断开".to_string())?;
-    Ok(data.len())
+    match s.writer.try_send(data.to_vec()) {
+        Ok(()) => Ok(data.len()),
+        Err(mpsc::TrySendError::Full(_)) => {
+            Err("发送队列已满：设备未及时收数，请降低发送频率".into())
+        }
+        Err(mpsc::TrySendError::Disconnected(_)) => Err("串口已断开".into()),
+    }
 }
 
 pub fn set_pins(state: &AppState, dtr: bool, rts: bool) -> Result<(), String> {
@@ -227,8 +242,10 @@ pub fn set_pins(state: &AppState, dtr: bool, rts: bool) -> Result<(), String> {
 
 pub fn start_capture(state: &AppState, path: &str) -> Result<(), String> {
     let file = OpenOptions::new()
+        .read(true)
+        .write(true)
         .create(true)
-        .append(true)
+        .truncate(true) // 保存对话框语义是"新文件"：覆盖而非追加
         .open(path)
         .map_err(|e| format!("无法创建接收文件：{e}"))?;
     *state.capture_file.lock().unwrap() = Some(BufWriter::with_capacity(16 * 1024, file));
@@ -251,16 +268,18 @@ pub fn stop_capture(state: &AppState) -> Result<u64, String> {
 type TxData = mpsc::Sender<(Instant, Vec<u8>)>;
 type RxWrite = mpsc::Receiver<Vec<u8>>;
 
-fn run_port_loop(
-    mut port: Box<dyn serialport::SerialPort>,
+/// 端口读写循环线程的输入（避免过长参数列表）。
+struct PortLoopCtx {
+    port: Box<dyn serialport::SerialPort>,
     tx_data: TxData,
     rx_write: RxWrite,
     cancel: Arc<AtomicBool>,
     dtr_want: Arc<AtomicBool>,
     rts_want: Arc<AtomicBool>,
-    app: &AppHandle,
-    port_name: &str,
-) {
+}
+
+fn run_port_loop(ctx: PortLoopCtx, app: &AppHandle, port_name: &str) {
+    let PortLoopCtx { mut port, tx_data, rx_write, cancel, dtr_want, rts_want } = ctx;
     let mut buf = vec![0u8; 8192];
     let mut dtr_cur = dtr_want.load(Ordering::SeqCst);
     let mut rts_cur = rts_want.load(Ordering::SeqCst);
@@ -323,6 +342,40 @@ struct PacketEvent {
     hex: String,
 }
 
+/// 落盘写入：成功才计数；周期 flush 平衡性能与丢失上限；出错立即终止录制
+/// 并上报一次 `capture-error`（前端据此复位录制 UI）。
+fn write_capture(
+    app: &AppHandle,
+    cap_file: &Arc<Mutex<Option<BufWriter<File>>>>,
+    cap_count: &AtomicU64,
+    data: &[u8],
+    last_flush: &mut Instant,
+) {
+    let mut g = match cap_file.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    let Some(w) = g.as_mut() else { return };
+    let due = last_flush.elapsed() >= Duration::from_millis(CAPTURE_FLUSH_MS);
+    let res = w.write_all(data).and_then(|_| if due { w.flush() } else { Ok(()) });
+    match res {
+        Ok(()) => {
+            cap_count.fetch_add(data.len() as u64, Ordering::SeqCst);
+            if due {
+                *last_flush = Instant::now();
+            }
+        }
+        Err(e) => {
+            *g = None; // 终止录制，避免每包重复报错
+            drop(g);
+            let _ = app.emit(
+                "capture-error",
+                serde_json::json!({ "message": format!("录制写入失败：{e}") }),
+            );
+        }
+    }
+}
+
 fn run_aggregator(
     app: AppHandle,
     port_name: String,
@@ -340,24 +393,18 @@ fn run_aggregator(
     let mut buf_first_ts: u64 = 0;
     let mut last_rx: Option<Instant> = None;
     let mut last_emit = Instant::now();
+    let mut cap_last_flush = Instant::now();
 
     macro_rules! flush_packet {
         () => {
             if !buf.is_empty() {
                 let data = std::mem::take(&mut buf);
-                if let Ok(mut f) = cap_file.lock() {
-                    if let Some(w) = f.as_mut() {
-                        let _ = w.write_all(&data);
-                        let _ = w.flush();
-                    }
-                }
-                cap_count.fetch_add(data.len() as u64, Ordering::SeqCst);
+                write_capture(&app, &cap_file, &cap_count, &data, &mut cap_last_flush);
                 pending.push(PacketEvent {
                     ts_millis: buf_first_ts,
                     len: data.len(),
                     hex: hexio::format_hex_grouped(&data),
                 });
-                last_rx = None;
             }
         };
     }
@@ -406,5 +453,11 @@ fn run_aggregator(
     if !pending.is_empty() {
         let ev = serde_json::json!({ "port": port_name, "packets": pending });
         let _ = app.emit("serial-data", ev);
+    }
+    // 串口关闭但录制未停时，把缓冲区里最后一段刷到磁盘
+    if let Ok(mut g) = cap_file.lock() {
+        if let Some(w) = g.as_mut() {
+            let _ = w.flush();
+        }
     }
 }

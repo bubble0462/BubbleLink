@@ -18,10 +18,26 @@ use tauri::{AppHandle, Emitter, Manager};
 // 设备识别
 // ---------------------------------------------------------------------------
 
-const KINDS: &[(&str, &str, u16, u16)] = &[
-    ("stlink", "00 · ST-Link", 0x0483, 0x3748),
-    ("daplink", "01 · DAPLink", 0x0d28, 0x0204),
-    ("bmp", "10 · BMP", 0x1d50, 0x6018),
+/// ST-Link 家族 PID（TN1235）：V2=3748，V2-1=374A/374B/374D/3752，
+/// V3=374C/374E/374F/3753(带 bridge)/3754(无 bridge)/3757(V3PWR)
+const STLINK_PIDS: &[u16] = &[
+    0x3748, 0x374A, 0x374B, 0x374C, 0x374D, 0x374E, 0x374F, 0x3752, 0x3753, 0x3754, 0x3757,
+];
+/// DAPLink/mbed：0204 标准 CMSIS-DAP，0203 旧版 mbed 复合设备
+const DAPLINK_PIDS: &[u16] = &[0x0204, 0x0203];
+const BMP_PIDS: &[u16] = &[0x6018];
+
+struct ProbeKindDef {
+    kind: &'static str,
+    label: &'static str,
+    vid: u16,
+    pids: &'static [u16],
+}
+
+const KINDS: &[ProbeKindDef] = &[
+    ProbeKindDef { kind: "stlink", label: "00 · ST-Link", vid: 0x0483, pids: STLINK_PIDS },
+    ProbeKindDef { kind: "daplink", label: "01 · DAPLink", vid: 0x0d28, pids: DAPLINK_PIDS },
+    ProbeKindDef { kind: "bmp", label: "10 · BMP", vid: 0x1d50, pids: BMP_PIDS },
 ];
 
 #[derive(Serialize, Clone)]
@@ -35,42 +51,96 @@ pub struct ProbeDevice {
     pub count: usize,
 }
 
+/// "COM3" 之类的回退名（CDC 没有序列号时用端口名顶替）。
+fn is_com_name(h: &str) -> bool {
+    h.len() <= 5 && h.starts_with("COM") && h[3..].bytes().all(|b| b.is_ascii_digit())
+}
+
+/// HID 实例路径（`...\USB\VID_x&PID_y\SN`）的尾段即父设备序列号。
+fn hid_instance_serial(path: &str) -> &str {
+    path.rsplit(['\\', '/']).next().unwrap_or("").trim()
+}
+
 /// 汇总当前在线的三模烧录器。
+///
+/// 来源优先级：
+/// ① PnP 在线 USB 设备接口（cfgmgr32，见 usbenum.rs）——主来源，
+///    覆盖经典 ST-Link/V2 这类无 CDC/HID 接口的设备；每台设备恰好一个
+///    USB_DEVICE 接口，条目数即设备数。
+/// ② CDC 串口 / HID 活跃实例——PnP 不可用时兜底计数，并补充真实序列号。
 pub fn identify_probes(com_ports: &[serialport::SerialPortInfo]) -> Vec<ProbeDevice> {
-    // 来源 A：CDC 串口里的 USB 设备信息
-    let mut seen: HashMap<(u16, u16), Vec<String>> = HashMap::new();
+    let usb = crate::usbenum::present_usb_devices();
+    let mut cdc: HashMap<(u16, u16), Vec<String>> = HashMap::new();
     for info in com_ports {
         if let serialport::SerialPortType::UsbPort(u) = &info.port_type {
-            seen.entry((u.vid, u.pid)).or_default().push(
+            cdc.entry((u.vid, u.pid)).or_default().push(
                 u.serial_number.clone().unwrap_or_else(|| info.port_name.clone()),
             );
         }
     }
-    // 来源 B：HID 服务里正在运行的实例
-    for ((vid, pid), inst) in hid_active_instances() {
-        seen.entry((vid, pid)).or_default().extend(inst);
-    }
+    let hid = hid_active_instances();
 
     KINDS
         .iter()
-        .filter_map(|&(kind, label, vid, pid)| {
-            let hits = seen.get(&(vid, pid))?;
-            if hits.is_empty() {
+        .filter_map(|k| {
+            let mut hint: Option<String> = None;
+            let mut count = 0usize;
+            let mut found = false;
+            for &pid in k.pids {
+                let key = (k.vid, pid);
+                // ① PnP 在线接口
+                let sns: Vec<&str> = usb
+                    .iter()
+                    .filter(|(v, p, _)| (*v, *p) == key)
+                    .map(|(_, _, s)| s.as_str())
+                    .collect();
+                if !sns.is_empty() {
+                    found = true;
+                    count += sns.len();
+                    hint = hint.or_else(|| best_serial(&sns));
+                }
+                // ② CDC：兜底计数 + 真实序列号优先
+                let cdc_ports = cdc.get(&key);
+                if let Some(ports) = cdc_ports {
+                    found = true;
+                    if sns.is_empty() {
+                        count += ports.len();
+                    }
+                    hint = hint
+                        .or_else(|| ports.iter().find(|h| !is_com_name(h)).cloned());
+                }
+                // ② HID：兜底计数（接口数 ≥ 设备数，按父序列号去重近似）
+                if let Some(insts) = hid.get(&key) {
+                    let hsns: Vec<&str> =
+                        insts.iter().map(|p| hid_instance_serial(p)).collect();
+                    if sns.is_empty() && cdc_ports.is_none() && !hsns.is_empty() {
+                        found = true;
+                        let mut uniq = hsns.clone();
+                        uniq.sort_unstable();
+                        uniq.dedup();
+                        count += uniq.len().max(1);
+                    }
+                    hint = hint.or_else(|| best_serial(&hsns));
+                }
+            }
+            if !found {
                 return None;
             }
-            // 优先展示序列号；CDC 回退值是 "COM3" 这类名字，放最后
-            let is_com_name = |h: &&String| -> bool {
-                h.len() <= 5 && h.starts_with("COM") && h[3..].bytes().all(|b| b.is_ascii_digit())
-            };
-            let hint = hits.iter().find(|h| !is_com_name(h)).unwrap_or(&hits[0]).clone();
             Some(ProbeDevice {
-                kind: kind.to_string(),
-                label: label.to_string(),
-                hint,
-                count: hits.len(),
+                kind: k.kind.to_string(),
+                label: k.label.to_string(),
+                hint: hint.unwrap_or_default(),
+                count: count.max(1),
             })
         })
         .collect()
+}
+
+/// 挑选可展示的序列号：跳过 Windows 生成的父实例 ID（含 '&'）。
+fn best_serial(sns: &[&str]) -> Option<String> {
+    sns.iter()
+        .find(|s| !s.is_empty() && !s.contains('&'))
+        .map(|s| s.to_string())
 }
 
 /// HKLM\SYSTEM\CurrentControlSet\Services\hidserv\Enum 中记录了**正在运行**的
@@ -90,14 +160,18 @@ fn hid_active_instances() -> HashMap<(u16, u16), Vec<String>> {
     for (val_name, _) in root.enum_values().flatten() {
         let Ok::<String, _>(path) = root.get_value(&val_name) else { continue };
         let lower = path.to_lowercase();
-        // 形如 \hid\vid_0d28&pid_0204&mi_01\8&abcdef&0&0000
+        // 形如 \hid\vid_0d28&pid_0204&mi_01\8&abcdef&0&0000 —— 用 get() 切片，
+        // 异常短路径只会解析失败而不会越界 panic
         let Some(vid_pos) = lower.find("vid_") else { continue };
         let Some(pid_rel) = lower[vid_pos..].find("&pid_") else { continue };
         let pid_abs = vid_pos + pid_rel + 5;
-        let Ok(vid) = u16::from_str_radix(&lower[vid_pos + 4..vid_pos + 8], 16) else { continue };
+        let vid = lower
+            .get(vid_pos + 4..vid_pos + 8)
+            .and_then(|s| u16::from_str_radix(s, 16).ok());
         let rest = &lower[pid_abs..];
         let pid_end = rest.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(rest.len());
-        let Ok(pid) = u16::from_str_radix(&rest[..pid_end], 16) else { continue };
+        let pid = rest.get(..pid_end).and_then(|s| u16::from_str_radix(s, 16).ok());
+        let (Some(vid), Some(pid)) = (vid, pid) else { continue };
         out.entry((vid, pid)).or_insert_with(Vec::new).push(path);
     }
     out
@@ -260,6 +334,9 @@ pub fn probe_target() -> TargetInfo {
     }
 }
 
+/// 只读识别，不干预目标运行状态：pyOCD commander 默认 connect_mode=attach
+/// （连接不暂停内核）且 resume_on_disconnect=False（断开不恢复），因此这里
+/// 不追加 `go`——识别前后目标程序照常运行，无任何副作用。
 fn run_pyocd_reads() -> Result<String, String> {
     let exe = pyocd_binary()?;
     let mut command = Command::new(&exe);
@@ -273,8 +350,6 @@ fn run_pyocd_reads() -> Result<String, String> {
         "read32 0xE0042000",
         "-c",
         "read32 0x1FFFF7E0",
-        "-c",
-        "go",
     ]);
     command.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
     #[cfg(windows)]
@@ -289,9 +364,9 @@ fn run_pyocd_reads() -> Result<String, String> {
     let t_err = std::thread::spawn(move || collect_output(stderr));
 
     let deadline = Instant::now() + Duration::from_secs(9);
-    loop {
+    let exit_status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) => {
                 if Instant::now() > deadline {
                     let _ = child.kill();
@@ -304,10 +379,27 @@ fn run_pyocd_reads() -> Result<String, String> {
             Err(e) => return Err(e.to_string()),
         }
         std::thread::sleep(Duration::from_millis(100));
-    }
+    };
     let out = t_out.join().unwrap_or_default();
-    let _ = t_err.join();
+    let err = t_err.join().unwrap_or_default();
+    // 识别失败时把 stderr 尾部带出来（pyOCD 的连接/目标错误大多打在 stderr）
+    if !exit_status.success() {
+        let tail = last_lines(&err, 3)
+            .or_else(|| last_lines(&out, 3))
+            .unwrap_or_else(|| "无错误输出".into());
+        return Err(format!("pyOCD 识别失败：{tail}"));
+    }
     Ok(out)
+}
+
+/// 取文本末尾最多 n 条非空行。
+fn last_lines(text: &str, n: usize) -> Option<String> {
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines[lines.len().saturating_sub(n)..].join(" | "))
+    }
 }
 
 fn collect_output<R: std::io::Read + Send + 'static>(r: R) -> String {
@@ -337,10 +429,11 @@ fn interpret_target(out: &str) -> TargetInfo {
         (0x414, Some(256)) => ("高密度", "stm32f103vc（高密度 · 256KB，推测）"),
         (0x414, Some(384)) => ("高密度", "stm32f103rc/rd（高密度 · 256~384KB，推测）"),
         (0x414, _) => ("高密度", "STM32F103 高密度（按容量选择型号）"),
-        (0x418, _) => ("超大容量", "STM32F103 ZE/ZG（超大容量，推测）"),
+        // RM0008：0x418 = 互联型（F105/F107），0x430 = 超大容量 XL（F103xF/xG）
+        (0x418, _) => ("互联型", "STM32F105/F107（互联型，推测）"),
+        (0x430, _) => ("超大容量 XL", "STM32F103 ZG/XG（超大容量 · 768KB~1MB，推测）"),
         (0x410, _) => ("中密度", "STM32F103 C8/RB（中密度，推测）"),
         (0x412, _) => ("低密度", "STM32F10x 低密度"),
-        (0x430, _) => ("互联型", "STM32F105/107"),
         _ => ("未知", "未知型号（请手动选择）"),
     };
     TargetInfo {
@@ -814,6 +907,28 @@ mod tests {
         let info = interpret_target("some random output\nnothing here");
         assert!(!info.detected);
         assert!(info.message.is_some());
+    }
+
+    #[test]
+    fn target_interpret_dev_id_418_430() {
+        // RM0008：0x418 = 互联型（F105/F107），0x430 = 超大容量 XL —— 防回归
+        let out_418 = ">>> read32 0xE0042000\n0xE0042000: 00000418\n>>> read32 0x1FFFF7E0\n0x1FFFF7E0: 00000080\n";
+        let info = interpret_target(out_418);
+        assert_eq!(info.dev_id, Some(0x418));
+        assert_eq!(info.density, "互联型");
+        assert!(info.guess.contains("F105"));
+
+        let out_430 = ">>> read32 0xE0042000\n0xE0042000: 00000430\n>>> read32 0x1FFFF7E0\n0x1FFFF7E0: 00000400\n";
+        let info = interpret_target(out_430);
+        assert_eq!(info.dev_id, Some(0x430));
+        assert_eq!(info.density, "超大容量 XL");
+        assert!(info.guess.contains("ZG"));
+    }
+
+    #[test]
+    fn tail_lines_helper() {
+        assert_eq!(last_lines("a\nb\nc\n", 2).as_deref(), Some("b | c"));
+        assert_eq!(last_lines("  \n \n", 3), None);
     }
 
     #[test]

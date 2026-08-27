@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import {
   api,
+  onEvent,
+  subscribeAll,
   type FirmwareMeta,
   type ProbeDevice,
   type TargetInfo,
@@ -34,9 +36,11 @@ function fmtAddr(a?: number): string {
 
 interface Props {
   onStatusChange: (label: string | null) => void;
+  /** 当前是否为激活页（页面常驻挂载，仅切换显示，保证烧录任务状态不丢） */
+  active: boolean;
 }
 
-export default function FlashPage({ onStatusChange }: Props) {
+export default function FlashPage({ onStatusChange, active }: Props) {
   // ---- 设备识别 ----
   const [probes, setProbes] = useState<ProbeDevice[]>([]);
   const [firstProbe, setFirstProbe] = useState(true);
@@ -62,8 +66,8 @@ export default function FlashPage({ onStatusChange }: Props) {
     setRefreshing(false);
   }, [refreshProbes]);
 
+  // 引擎自检只在挂载时执行一次（后台页面也需要结论，flash-done 前即可就绪）
   useEffect(() => {
-    void refreshProbes();
     api.pyocdCheck()
       .then((v) => {
         setEngineVer(v);
@@ -76,9 +80,15 @@ export default function FlashPage({ onStatusChange }: Props) {
         setCliErr(null);
       })
       .catch((e) => setCliErr(String(e instanceof Error ? e.message : e)));
+  }, []);
+
+  // 设备轮询仅在页面可见时进行（隐藏页不空转注册表/USB 查询；切回时立即刷一次）
+  useEffect(() => {
+    if (!active) return;
+    void refreshProbes();
     const t = setInterval(refreshProbes, 2000);
     return () => clearInterval(t);
-  }, [refreshProbes]);
+  }, [active, refreshProbes]);
 
   const activeKind = useMemo<"daplink" | "stlink" | "bmp" | null>(() => {
     const pri: Array<ProbeDevice["kind"]> = ["daplink", "stlink", "bmp"];
@@ -210,44 +220,32 @@ export default function FlashPage({ onStatusChange }: Props) {
 
   // ---- 引擎事件 ----
   useEffect(() => {
-    let offP: (() => void) | undefined;
-    let offD: (() => void) | undefined;
-    let offL: (() => void) | undefined;
-    let alive = true;
-
-    import("@tauri-apps/api/event").then(async ({ listen }) => {
-      if (!alive) return;
-      offP = await listen<{ phase: string; percent: number }>("flash-progress", (ev) => {
-        const pct = Math.min(100, ev.payload.percent);
+    const sub = subscribeAll([
+      onEvent<{ phase: string; percent: number }>("flash-progress", (pl) => {
+        const pct = Math.min(100, pl.percent);
         if (pct >= percentRef.current || percentRef.current === 100) {
           percentRef.current = pct;
           setPercent(pct);
         }
-        setPhase(ev.payload.phase);
-      });
-      offD = await listen<{ ok: boolean; message: string }>("flash-done", (ev) => {
+        setPhase(pl.phase);
+      }),
+      onEvent<{ ok: boolean; message: string }>("flash-done", (pl) => {
         setBusy(false);
-        percentRef.current = ev.payload.ok ? 100 : 0;
-        setPercent(ev.payload.ok ? 100 : 0);
-        pushLog(ev.payload.message, ev.payload.ok ? "fl-ok" : "fl-err");
-        showToast(ev.payload.message.split("。")[0], ev.payload.ok);
+        percentRef.current = pl.ok ? 100 : 0;
+        setPercent(pl.ok ? 100 : 0);
+        pushLog(pl.message, pl.ok ? "fl-ok" : "fl-err");
+        showToast(pl.message.split("。")[0], pl.ok);
         void refreshProbes();
-      });
-      offL = await listen<{ line: string }>("flash-log", (ev) => {
-        const line = ev.payload.line;
+      }),
+      onEvent<{ line: string }>("flash-log", (pl) => {
+        const line = pl.line;
         let cls = "";
         if (/error|err:|failed|fail/i.test(line)) cls = "fl-err";
         else if (/done|complete|success|verified|\bOK\b/i.test(line)) cls = "fl-ok";
         pushLog(line, cls);
-      });
-    });
-
-    return () => {
-      alive = false;
-      offP?.();
-      offD?.();
-      offL?.();
-    };
+      }),
+    ]);
+    return sub.cancel;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -320,7 +318,7 @@ export default function FlashPage({ onStatusChange }: Props) {
   const sizeKB = meta ? meta.size_bytes / 1024 : 0;
 
   return (
-    <main className="page page-flash active">
+    <main className={`page page-flash${active ? " active" : ""}`}>
       {/* 左列三步卡片 */}
       <div className="col-scroll">
 
@@ -423,16 +421,16 @@ export default function FlashPage({ onStatusChange }: Props) {
                   {fmtBytes(meta.size_bytes)}
                   {" · "}
                   {meta.kind === "hex" && meta.crc32 !== undefined
-                    ? `${fmtAddr(meta.min_addr)} – ${fmtAddr(meta.max_addr)} · CRC32 ${meta.crc32!.toString(16).toUpperCase().padStart(8, "0")}`
+                    ? `${fmtAddr(meta.min_addr)} – ${fmtAddr(meta.max_addr)} · 载荷CRC32 ${meta.crc32!.toString(16).toUpperCase().padStart(8, "0")}`
                     : meta.crc32 !== undefined
-                      ? `CRC32 ${meta.crc32!.toString(16).toUpperCase().padStart(8, "0")}`
+                      ? `载荷CRC32 ${meta.crc32!.toString(16).toUpperCase().padStart(8, "0")}`
                       : "CRC 计算中"}
                 </div>
               </div>
             ) : (
               <div>
                 <div className="dev-name">点击选择固件文件</div>
-                <div className="dev-meta">或将文件拖入此区域 · HEX 自动解析地址范围与 CRC32</div>
+                <div className="dev-meta">或将文件拖入此区域 · HEX 自动解析地址范围与载荷 CRC32</div>
               </div>
             )}
             <button className="ghost-btn" style={{ marginLeft: "auto" }}>
@@ -606,7 +604,7 @@ export default function FlashPage({ onStatusChange }: Props) {
 
 function kindVidPid(kind: ProbeDevice["kind"]): string {
   switch (kind) {
-    case "stlink": return "0483:3748";
+    case "stlink": return "0483:374x";
     case "bmp": return "1d50:6018";
     default: return "0d28:0204";
   }

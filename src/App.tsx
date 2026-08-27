@@ -6,7 +6,10 @@ type TabId = "flash" | "serial";
 
 export default function App() {
   const [tab, setTab] = useState<TabId>("flash");
-  const [connLabel, setConnLabel] = useState<string | null>(null);
+  // 两个页面常驻挂载、只切换显示：串口会话、录制路径、烧录进度与日志
+  // 不因来回切页而丢失（后端任务在页面隐藏期间照常运行并继续上报事件）。
+  const [flashLabel, setFlashLabel] = useState<string | null>(null);
+  const [serialLabel, setSerialLabel] = useState<string | null>(null);
   const indRef = useRef<HTMLDivElement>(null);
   const btnFlash = useRef<HTMLButtonElement>(null);
   const btnSerial = useRef<HTMLButtonElement>(null);
@@ -24,6 +27,11 @@ export default function App() {
     return () => window.removeEventListener("resize", moveInd);
   });
 
+  // 在线状态与 CDC 徽章跟随"当前页"的标签：烧录页看设备、串口页看连接
+  const currentLabel = tab === "flash" ? flashLabel : serialLabel;
+  const on = currentLabel !== null;
+  const serialOn = tab === "serial" && on;
+
   return (
     <>
       <div className="aurora" />
@@ -32,10 +40,10 @@ export default function App() {
         <span className="app-name title-flow">BubbleLink Studio</span>
         <span className="app-sub">三模烧录器工作站</span>
         <div className="spacer" />
-        <div className={`status-pill${connLabel ? "" : " off"}`}>
-          <span className={`dot${connLabel ? "" : " off"}`} />
-          {connLabel ?? "未连接设备"}
-          {connLabel && <span className="mode-badge">CDC</span>}
+        <div className={`status-pill${on ? "" : " off"}`}>
+          <span className={`dot${on ? "" : " off"}`} />
+          {currentLabel ?? (tab === "flash" ? "未识别到烧录器" : "串口未连接")}
+          {serialOn && <span className="mode-badge">CDC</span>}
         </div>
       </header>
 
@@ -50,9 +58,8 @@ export default function App() {
         <div className="tab-ind" ref={indRef} />
       </nav>
 
-      {tab === "flash"
-        ? <FlashPage onStatusChange={setConnLabel} />
-        : <SerialPage onConnChange={setConnLabel} />}
+      <FlashPage active={tab === "flash"} onStatusChange={setFlashLabel} />
+      <SerialPage active={tab === "serial"} onConnChange={setSerialLabel} />
     </>
   );
 }

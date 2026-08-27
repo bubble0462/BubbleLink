@@ -3,7 +3,7 @@
 > **三模烧录器工作站** —— 一个自研三模硬件调试器（ST-Link / DAPLink / BMP）的上位机
 > 串口终端 + 双引擎烧录工作台，Tauri 2 + React + Rust 构建
 
-**🧪 当前状态：`v0.9.0-beta` 公开测试版** —— 功能已完整，正在等待硬件实测反馈。
+**🧪 当前状态：`v0.9.1-beta` 公开测试版** —— 功能已完整，正在等待硬件实测反馈。
 欢迎提 Issue 反馈问题；正式版将在实测清单通过后发布。
 
 ---
@@ -49,12 +49,12 @@ ST-Link / DAPLink / Black Magic Probe 三种固件模式，本软件负责另外
 
 ## 📦 下载安装
 
-前往 [**Releases**](https://github.com/bubble0462/BubbleLink/releases) 下载 `v0.9.0-beta`：
+前往 [**Releases**](https://github.com/bubble0462/BubbleLink/releases) 下载 `v0.9.1-beta`：
 
 | 文件 | 说明 |
 |---|---|
-| `BubbleLink_Studio_0.9.0_beta_setup.exe` | 安装包（2MB）：中文向导、免管理员、自动创建快捷方式、带卸载器 |
-| `BubbleLink_Studio_0.9.0_beta_portable.exe` | 便携版（9MB）：单文件双击即用 |
+| `BubbleLink_Studio_0.9.1_beta_setup.exe` | 安装包（2MB）：中文向导、免管理员、自动创建快捷方式、带卸载器 |
+| `BubbleLink_Studio_0.9.1_beta_portable.exe` | 便携版（9MB）：单文件双击即用 |
 
 > 需要 Windows 10/11（系统自带 WebView2 即可，无需装浏览器）。
 
