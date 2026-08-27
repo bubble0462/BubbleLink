@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>BubbleLink Studio · 三模烧录器工作站</title>
+<style>
+/* ============ 设计令牌：蓝白简洁主题（绿=成功/在线，红=仅报错） ============ */
+:root{
+  --bg-page:#f3f6fb;            /* 页面底：浅蓝灰 */
+  --bg-card:#ffffff;
+  --bg-inset:#f7f9fc;           /* 输入框/次级 */
+  --bg-term:#0f1a30;            /* 终端：深藏青（蓝色家族） */
+  --primary:#1668dc;  --primary-hover:#3c85ff;
+  --primary-tint:rgba(22,104,220,.07);
+  --green:#16a34a;  --green-tint:rgba(22,163,74,.09);
+  --red:#e5484d;
+  --amber:#e88a1a;              /* 仅终端内 WARN 用 */
+  --text-1:#17233d; --text-2:#4e5969; --text-3:#8a94a6;
+  --border:#e4e9f2; --border-strong:#cfd7e4;
+  --radius-md:10px; --radius-lg:14px; --radius-full:999px;
+  --shadow-card:0 1px 2px rgba(23,35,61,.04),0 6px 20px rgba(23,35,61,.05);
+  --font-sans:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  --font-mono:"Cascadia Mono","SF Mono",Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden}
+body{font-family:var(--font-sans);background:var(--bg-page);color:var(--text-2);font-size:14px;line-height:1.6;display:flex;flex-direction:column}
+button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit}
+::-webkit-scrollbar{width:9px;height:9px}
+::-webkit-scrollbar-thumb{background:#c4cede;border-radius:5px;border:2px solid transparent;background-clip:content-box}
+.term ::-webkit-scrollbar-thumb{background:#2a3a5c}
+
+/* ============ 顶栏 ============ */
+.topbar{height:56px;display:flex;align-items:center;gap:14px;padding:0 20px;background:#fff;border-bottom:1px solid var(--border)}
+.logo{width:32px;height:32px;border-radius:8px;background:linear-gradient(135deg,#1668dc,#3c85ff);display:flex;align-items:center;justify-content:center;font-size:17px;color:#fff;box-shadow:0 3px 10px rgba(22,104,220,.32)}
+.app-name{font-size:17px;font-weight:700;color:var(--primary)}
+.app-sub{font-size:12px;color:var(--text-3);background:var(--bg-inset);border:1px solid var(--border);padding:2px 11px;border-radius:var(--radius-full)}
+.topbar .spacer{flex:1}
+.status-pill{display:flex;align-items:center;gap:8px;padding:5px 14px;border-radius:var(--radius-full);background:var(--green-tint);border:1px solid rgba(22,163,74,.28);font-size:12.5px;color:var(--text-1)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px rgba(22,163,74,.18);animation:pulse 2s infinite}
+@keyframes pulse{50%{opacity:.45}}
+.mode-badge{padding:2px 10px;border-radius:var(--radius-full);font-size:12px;font-weight:600;color:var(--primary);background:var(--primary-tint);border:1px solid rgba(22,104,220,.30)}
+
+/* ============ 页签 ============ */
+.tabs{display:flex;gap:4px;padding:8px 20px 0;background:#fff;border-bottom:1px solid var(--border);position:relative}
+.tab{padding:9px 20px 11px;font-size:14px;color:var(--text-3);position:relative;transition:color .2s;border-radius:8px 8px 0 0}
+.tab:hover{color:var(--text-2)}
+.tab.active{color:var(--primary);font-weight:600}
+.tab.disabled{opacity:.45;cursor:not-allowed}
+.tab-ind{position:absolute;bottom:-1px;height:2.5px;background:var(--primary);border-radius:2px;transition:left .35s cubic-bezier(.22,1,.36,1),width .35s cubic-bezier(.22,1,.36,1)}
+
+/* ============ 页面布局 ============ */
+.page{display:none;flex:1;min-height:0;padding:14px 20px;gap:12px}
+.page.active{display:grid}
+#page-flash{grid-template-columns:1fr 300px;grid-template-rows:1fr 168px}
+#page-serial{grid-template-columns:1fr 294px;grid-template-rows:auto 1fr auto auto}
+
+/* ============ 卡片 ============ */
+.card{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-lg);box-shadow:var(--shadow-card);padding:15px 18px;overflow:hidden}
+.card.emphasis{border-color:rgba(22,104,220,.38);box-shadow:0 0 0 1px rgba(22,104,220,.12),var(--shadow-card)}
+.card-head{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.step-no{width:21px;height:21px;border-radius:50%;background:linear-gradient(135deg,#1668dc,#3c85ff);color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center}
+.card-title{font-size:14.5px;font-weight:600;color:var(--text-1)}
+.card-head .hint{margin-left:auto;font-size:12px;color:var(--text-3)}
+.ghost-btn{padding:5px 13px;border-radius:8px;border:1px solid var(--border-strong);color:var(--text-2);font-size:12.5px;background:#fff;transition:.15s}
+.ghost-btn:hover{border-color:var(--primary);color:var(--primary)}
+
+/* ---- 设备卡 ---- */
+.dev-row{display:flex;align-items:center;gap:14px;padding:11px 13px;border-radius:var(--radius-md);background:var(--primary-tint);border:1px solid rgba(22,104,220,.22)}
+.dev-ico{width:44px;height:44px;border-radius:10px;background:linear-gradient(135deg,#1668dc,#3c85ff);display:flex;align-items:center;justify-content:center;font-size:17px;font-weight:700;color:#fff;box-shadow:0 3px 10px rgba(22,104,220,.30);flex-shrink:0}
+.dev-name{font-size:15px;font-weight:600;color:var(--text-1);display:flex;align-items:center;gap:10px}
+.dev-meta{font-family:var(--font-mono);font-size:12px;color:var(--text-3);margin-top:2px}
+.dev-row .ghost-btn{margin-left:auto}
+.mode-strip{display:flex;align-items:center;gap:8px;margin-top:12px;flex-wrap:wrap}
+.chip{padding:3px 12px;border-radius:var(--radius-full);font-size:12px;font-family:var(--font-mono);border:1px solid var(--border-strong);color:var(--text-3);background:#fff}
+.chip.on{background:var(--primary);border-color:var(--primary);color:#fff;font-weight:600;box-shadow:0 2px 8px rgba(22,104,220,.35)}
+.mode-note{margin-left:auto;font-size:11.5px;color:var(--text-3)}
+
+/* ---- 固件卡 ---- */
+.file-row{display:flex;align-items:center;gap:13px;padding:11px 13px;border-radius:var(--radius-md);background:var(--bg-inset);border:1px dashed var(--border-strong)}
+.file-ico{width:40px;height:40px;border-radius:9px;background:var(--primary-tint);border:1px solid rgba(22,104,220,.30);display:flex;align-items:center;justify-content:center;font-size:18px;color:var(--primary);flex-shrink:0}
+.file-name{font-size:14.5px;font-weight:600;color:var(--text-1);display:flex;gap:9px;align-items:center}
+.fmt-badge{padding:1px 9px;border-radius:var(--radius-full);font-size:11px;font-family:var(--font-mono);font-weight:600;color:var(--primary);background:var(--primary-tint);border:1px solid rgba(22,104,220,.30)}
+.file-meta{font-family:var(--font-mono);font-size:12px;color:var(--text-3);margin-top:2px}
+.file-meta .pass{color:var(--green)}
+.file-row .ghost-btn{margin-left:auto;flex-shrink:0}
+
+/* ---- 设置卡 ---- */
+.opt-row{display:flex;align-items:center;gap:24px;flex-wrap:wrap;margin-bottom:14px}
+.opt{display:flex;align-items:center;gap:9px;font-size:13px;color:var(--text-2)}
+select.sel{appearance:none;background:#fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%238a94a6' fill='none' stroke-width='1.5'/%3E%3C/svg%3E") no-repeat right 10px center;
+  border:1px solid var(--border-strong);color:var(--text-1);padding:6px 30px 6px 12px;border-radius:8px;font-size:13px;font-family:inherit}
+.tgl{position:relative;width:38px;height:21px;display:inline-block;flex-shrink:0}
+.tgl input{opacity:0;width:0;height:0}
+.tgl .track{position:absolute;inset:0;border-radius:999px;background:#dce1ea;transition:.25s}
+.tgl .track::before{content:"";position:absolute;width:15px;height:15px;border-radius:50%;background:#fff;top:3px;left:3px;box-shadow:0 1px 3px rgba(23,35,61,.25);transition:.25s cubic-bezier(.34,1.56,.64,1)}
+.tgl input:checked+.track{background:var(--primary)}
+.tgl input:checked+.track::before{transform:translateX(17px)}
+.action-row{display:flex;align-items:center;gap:24px}
+.btn-flash{padding:11px 36px;border-radius:var(--radius-md);background:var(--primary);color:#fff;font-size:15px;font-weight:700;letter-spacing:1px;box-shadow:0 4px 14px rgba(22,104,220,.32);transition:.2s}
+.btn-flash:hover{background:var(--primary-hover);transform:translateY(-1px)}
+.prog-block{flex:1}
+.prog-top{display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:6px}
+.prog-top .phase{color:var(--text-1);font-weight:600}
+.prog-top .pct{font-family:var(--font-mono);color:var(--primary);font-weight:700}
+.progress{width:100%;max-width:none;height:8px;border-radius:4px;background:#e3ebf7;overflow:hidden}
+.progress-bar{height:100%;width:0;border-radius:inherit;background:linear-gradient(90deg,#1668dc,#3c85ff);transition:width 1s cubic-bezier(.22,1,.36,1);
+  background-image:linear-gradient(45deg,rgba(255,255,255,.20) 25%,transparent 25%,transparent 50%,rgba(255,255,255,.20) 50%,rgba(255,255,255,.20) 75%,transparent 75%),linear-gradient(90deg,#1668dc,#3c85ff);
+  background-size:16px 16px,100% 100%;animation:stripe .8s linear infinite}
+@keyframes stripe{to{background-position:16px 0,0 0}}
+.prog-stats{margin-top:6px;font-family:var(--font-mono);font-size:11.5px;color:var(--text-3)}
+
+/* ---- 右栏信息面板 ---- */
+.side{display:flex;flex-direction:column;gap:12px;min-height:0}
+.panel{background:#fff;border:1px solid var(--border);border-radius:var(--radius-lg);padding:13px 16px;box-shadow:var(--shadow-card)}
+.panel h4{font-size:12px;font-weight:600;color:var(--text-3);letter-spacing:1px;margin-bottom:9px}
+.kv{display:flex;justify-content:space-between;padding:4.5px 0;font-size:12.5px;border-bottom:1px dashed #eef1f6}
+.kv:last-child{border-bottom:none}
+.kv .k{color:var(--text-3)}
+.kv .v{color:var(--text-1);font-family:var(--font-mono);font-size:12px;font-weight:600}
+.kv .v.ok{color:var(--green)}
+.kv .v.blue{color:var(--primary)}
+.info-box{background:var(--primary-tint);border:1px solid rgba(22,104,220,.22);border-radius:var(--radius-md);padding:10px 12px}
+.info-box li{list-style:none;font-size:12px;color:var(--text-2);padding:2.5px 0;display:flex;gap:7px;line-height:1.55}
+.info-box li::before{content:"ℹ";color:var(--primary);flex-shrink:0}
+
+/* ---- 日志条 ---- */
+.log-card{grid-column:1/-1;display:flex;flex-direction:column;min-height:0}
+.log-body{flex:1;overflow:hidden;font-family:var(--font-mono);font-size:12.5px;line-height:1.85;padding:2px 6px}
+.ll .ts{color:var(--text-3);margin-right:14px}
+.ll .i{color:var(--primary)} .ll .ok{color:var(--green)} .ll .rn{color:#7c5cd6}
+.ll .hl{color:var(--text-1);font-weight:600}
+
+/* ============ 串口页 ============ */
+.ser-toolbar{grid-column:1/-1;display:flex;align-items:center;gap:12px;padding:11px 16px;flex-wrap:wrap}
+.ser-toolbar .lbl{font-size:12px;color:var(--text-3);margin-right:-5px}
+.ser-toolbar .grow{flex:1}
+.filter-in{background:#fff;border:1px solid var(--border-strong);color:var(--text-1);padding:6px 12px;border-radius:8px;font-size:12.5px;width:170px;font-family:inherit}
+.filter-in::placeholder{color:var(--text-3)}
+.btn-disc{padding:7px 18px;border-radius:8px;font-size:13px;font-weight:600;color:var(--text-2);border:1px solid var(--border-strong);background:#fff;display:flex;align-items:center;gap:7px}
+.btn-disc:hover{color:var(--red);border-color:var(--red)}
+.btn-disc .dot{animation:none;box-shadow:none}
+.mini-act{padding:6px 13px;border-radius:8px;border:1px solid var(--border-strong);color:var(--text-2);font-size:12.5px;background:#fff}
+.mini-act:hover{color:var(--primary);border-color:var(--primary)}
+
+.term-wrap{display:flex;flex-direction:column;min-height:0;gap:10px}
+.recv-opts{display:flex;align-items:center;gap:14px;padding:8px 14px;background:#fff;border:1px solid var(--border);border-radius:var(--radius-md);flex-wrap:wrap}
+.chk{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--text-2);cursor:pointer;user-select:none}
+.chk input{accent-color:var(--primary);width:14px;height:14px;cursor:pointer}
+.chk b{color:var(--text-1);font-weight:600}
+.rec-on{display:flex;align-items:center;gap:6px;color:var(--green);font-size:12.5px;font-weight:600}
+.rec-on .rdot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px rgba(22,163,74,.15);animation:pulse 1.2s infinite}
+.mini-in{width:58px;padding:4px 8px;border:1px solid var(--border-strong);border-radius:7px;font-size:12.5px;background:#fff;color:var(--text-1);font-family:var(--font-mono)}
+.sel-sm{appearance:none;background:#fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%238a94a6' fill='none' stroke-width='1.5'/%3E%3C/svg%3E") no-repeat right 9px center;
+  border:1px solid var(--border-strong);color:var(--text-1);padding:5px 26px 5px 10px;border-radius:7px;font-size:12.5px;font-family:inherit}
+.opt-lbl{font-size:12px;color:var(--text-3)}
+.vline{width:1px;height:18px;background:var(--border)}
+.term{flex:1;min-height:0;overflow:hidden;background:var(--bg-term);border:1px solid #16233d;border-radius:var(--radius-md);padding:12px 16px;font-family:var(--font-mono);font-size:12.5px;line-height:1.78;color:#cdd8ee}
+.term .ts{color:#5a6b8f;margin-right:12px}
+.term .tag{color:#8fa3c8;font-weight:600}
+.term .lv-e{color:#ff757a;font-weight:700}
+.term .lv-w{color:#ffb65f}
+.term .lv-s{color:#43d17c;font-weight:700}
+.term .num{color:#6aa8ff}
+.term .cur{display:inline-block;width:7px;height:14px;background:#6aa8ff;vertical-align:-2px;animation:pulse 1s infinite}
+.send-bar{display:flex;align-items:center;gap:10px}
+.send-in{flex:1;background:#fff;border:1px solid var(--border-strong);color:var(--text-1);padding:9px 14px;border-radius:8px;font-size:13px;font-family:var(--font-mono)}
+.send-in:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px rgba(22,104,220,.12)}
+.btn-send{padding:8px 26px;border-radius:8px;background:var(--primary);color:#fff;font-weight:600;font-size:13px;box-shadow:0 3px 10px rgba(22,104,220,.30)}
+.btn-send:hover{background:var(--primary-hover)}
+.send-hint{font-size:11.5px;color:var(--text-3)}
+.status-bar{grid-column:1/-1;display:flex;align-items:center;gap:16px;padding:7px 16px;background:#fff;border:1px solid var(--border);border-radius:8px;font-size:11.5px;color:var(--text-3);font-family:var(--font-mono)}
+.status-bar .okc{color:var(--green);font-weight:600}
+.status-bar .right{margin-left:auto}
+
+.side .stats-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.stat{background:var(--bg-inset);border:1px solid var(--border);border-radius:8px;padding:8px 11px}
+.stat .n{font-size:19px;font-weight:700;color:var(--primary);font-family:var(--font-mono)}
+.stat .n.red{color:var(--red)}
+.stat .n.yel{color:var(--amber)}
+.stat .t{font-size:11px;color:var(--text-3)}
+.rule-row{display:flex;align-items:center;gap:8px;padding:5.5px 0;border-bottom:1px dashed #eef1f6;font-size:12px}
+.rule-row:last-of-type{border-bottom:none}
+.rule-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0}
+.rule-row code{font-family:var(--font-mono);font-size:11.5px;color:var(--text-2);background:var(--bg-inset);padding:1px 7px;border-radius:5px;border:1px solid var(--border)}
+.rule-row .cnt{margin-left:auto;font-size:11px;color:var(--text-3);font-family:var(--font-mono)}
+.add-rule{width:100%;margin-top:9px;padding:7px;border:1px dashed var(--border-strong);border-radius:8px;color:var(--text-3);font-size:12px;background:#fff;transition:.15s}
+.add-rule:hover{color:var(--primary);border-color:var(--primary)}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="logo">⚡</div>
+  <span class="app-name">BubbleLink Studio</span>
+  <span class="app-sub">三模烧录器工作站</span>
+  <div class="spacer"></div>
+  <div class="status-pill"><span class="dot"></span>烧录器已识别<span class="mode-badge">01 · DAPLink</span></div>
+</header>
+
+<nav class="tabs">
+  <button class="tab active" data-page="flash"><span class="t-ico">🔌</span>&nbsp;烧录工作台</button>
+  <button class="tab" data-page="serial"><span class="t-ico">📟</span>&nbsp;串口终端</button>
+  <button class="tab disabled" title="二期">⚙&nbsp;设置</button>
+  <div class="tab-ind" id="tabInd"></div>
+</nav>
+
+<!-- ================= 页面 1 · 烧录工作台 ================= -->
+<main class="page active" id="page-flash">
+  <div style="display:flex;flex-direction:column;gap:12px;min-height:0">
+
+    <div class="card emphasis">
+      <div class="card-head"><span class="step-no">1</span><span class="card-title">烧录器设备</span>
+        <button class="ghost-btn" style="margin-left:auto">⟳ 刷新设备</button></div>
+      <div class="dev-row">
+        <div class="dev-ico">BL</div>
+        <div>
+          <div class="dev-name">BubbleLink 三模烧录器 <span class="mode-badge">01 · DAPLink</span></div>
+          <div class="dev-meta">USB 0D28:0204 · SN 0x2A31 · CMSIS-DAP + CDC 虚拟串口</div>
+        </div>
+        <button class="ghost-btn">设备详情</button>
+      </div>
+      <div class="mode-strip">
+        <span class="chip">00 ST-Link</span>
+        <span class="chip on">01 DAPLink</span>
+        <span class="chip">10 BMP</span>
+        <span class="chip">11 恢复</span>
+        <span class="mode-note">拨动开关后需重新插拔 USB（D+ 上拉固定）</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><span class="step-no">2</span><span class="card-title">固件文件</span>
+        <span class="hint">支持 .hex / .bin / .elf</span></div>
+      <div class="file-row">
+        <div class="file-ico">⬢</div>
+        <div>
+          <div class="file-name">demo_app.hex <span class="fmt-badge">INTEL HEX</span></div>
+          <div class="file-meta">82.3 KB · 0x08000000 – 0x080148BF · CRC32 A3F1C7D9 · <span class="pass">✓ 与目标 Flash 512KB 比对通过</span></div>
+        </div>
+        <button class="ghost-btn">更换文件</button>
+      </div>
+    </div>
+
+    <div class="card" style="flex:1">
+      <div class="card-head"><span class="step-no">3</span><span class="card-title">烧录设置与执行</span></div>
+      <div class="opt-row">
+        <span class="opt">擦除方式
+          <select class="sel"><option>全片擦除</option><option>仅扇区擦除</option><option>不擦除</option></select></span>
+        <span class="opt"><label class="tgl"><input type="checkbox" checked><span class="track"></span></label>烧后校验</span>
+        <span class="opt"><label class="tgl"><input type="checkbox" checked><span class="track"></span></label>烧录后复位运行</span>
+      </div>
+      <div class="action-row">
+        <button class="btn-flash">⚡ 开始烧录</button>
+        <div class="prog-block">
+          <div class="prog-top"><span class="phase">正在写入固件…</span><span class="pct">45.2%</span></div>
+          <div class="progress"><div class="progress-bar" id="pbar"></div></div>
+          <div class="prog-stats">37.2 / 82.3 KB · 21.4 KB/s · 预计剩余 2s</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="side">
+    <div class="panel">
+      <h4>烧录器信息</h4>
+      <div class="kv"><span class="k">模式</span><span class="v blue">DAPLink (CMSIS-DAP)</span></div>
+      <div class="kv"><span class="k">固件版本</span><span class="v">0.6.1</span></div>
+      <div class="kv"><span class="k">序列号</span><span class="v">0x2A31</span></div>
+      <div class="kv"><span class="k">USB</span><span class="v">0D28:0204</span></div>
+      <div class="kv"><span class="k">虚拟串口</span><span class="v">COM3</span></div>
+    </div>
+    <div class="panel">
+      <h4>目标芯片</h4>
+      <div class="kv"><span class="k">状态</span><span class="v ok">● 已连接</span></div>
+      <div class="kv"><span class="k">型号</span><span class="v">STM32F103VE</span></div>
+      <div class="kv"><span class="k">内核</span><span class="v">Cortex-M3</span></div>
+      <div class="kv"><span class="k">Flash</span><span class="v">512 KB</span></div>
+      <div class="kv"><span class="k">IDCODE</span><span class="v">0x2BA01477</span></div>
+      <div class="kv"><span class="k">目标电压</span><span class="v">3.3 V</span></div>
+    </div>
+    <div class="info-box">
+      <ul>
+        <li>切换模式后必须重新插拔 USB，设备才会重新枚举</li>
+        <li>J_SELF（自身烧录口）与 J_SWD（目标口）不可同时连接</li>
+        <li>BMP 模式请用 gdb / VS Code 连接，本页面请切到 01</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="card log-card">
+    <div class="card-head" style="margin-bottom:6px"><span class="card-title">运行日志</span>
+      <span class="hint" style="margin-left:auto">自动滚动</span>
+      <button class="ghost-btn">导出</button><button class="ghost-btn">清空</button></div>
+    <div class="log-body">
+      <div class="ll"><span class="ts">12:19:17.204</span><span class="i">ℹ</span> 已识别烧录器：<span class="hl">DAPLink 模式</span>（0D28:0204），DAP 与 CDC 就绪</div>
+      <div class="ll"><span class="ts">12:19:18.011</span><span class="i">ℹ</span> SWD 连接成功：<span class="hl">STM32F103VE</span> · Cortex-M3 · Flash 512KB · IDCODE 0x2BA01477</div>
+      <div class="ll"><span class="ts">12:19:18.322</span><span class="rn">✦</span> 固件解析：demo_app.hex · 82.3 KB · 0x08000000–0x080148BF · CRC32 A3F1C7D9</div>
+      <div class="ll"><span class="ts">12:19:18.930</span><span class="ok">✓</span> 全片擦除完成（1.2s）</div>
+      <div class="ll"><span class="ts">12:19:19.105</span><span class="i">→</span> 正在写入… <span class="hl">45.2%</span>（37.2 / 82.3 KB · 21.4 KB/s）</div>
+    </div>
+  </div>
+</main>
+
+<!-- ================= 页面 2 · 串口终端 ================= -->
+<main class="page" id="page-serial">
+
+  <div class="card ser-toolbar">
+    <span class="lbl">端口</span>
+    <select class="sel"><option>COM3 — BubbleLink CDC (DAPLink)</option><option>COM7 — USB-SERIAL CH340</option></select>
+    <span class="lbl">波特率</span>
+    <select class="sel"><option>115200</option><option>921600</option><option>460800</option><option>230400</option><option>74880</option><option>9600</option></select>
+    <span class="lbl">编码</span>
+    <select class="sel"><option>UTF-8</option><option>GBK</option><option>HEX</option></select>
+    <button class="btn-disc"><span class="dot"></span>断开连接</button>
+    <span class="grow"></span>
+    <span class="opt"><label class="tgl"><input type="checkbox" checked><span class="track"></span></label>时间戳</span>
+    <span class="opt"><label class="tgl"><input type="checkbox" checked><span class="track"></span></label>自动滚动</span>
+    <input class="filter-in" placeholder="⌕ 过滤关键字…">
+    <button class="mini-act">清屏</button>
+    <button class="mini-act">导出日志</button>
+  </div>
+
+  <div class="term-wrap">
+    <div class="recv-opts">
+      <span class="opt-lbl">接收</span>
+      <label class="chk"><input type="checkbox">HEX 显示</label>
+      <label class="chk"><input type="checkbox" checked><b>时间戳</b></label>
+      <label class="chk"><input type="checkbox" checked>分包显示</label>
+      <span class="opt-lbl">超时</span><input class="mini-in" value="20"><span class="opt-lbl">ms · 按字节间隙分包</span>
+      <span class="vline"></span>
+      <label class="chk"><input type="checkbox" checked>高亮规则</label>
+      <button class="mini-act">保存数据</button>
+      <span class="rec-on"><span class="rdot"></span>接收数据到文件 rx_log_20260827.bin</button>
+    </div>
+    <div class="term">
+      <div><span class="ts">12:20:01.412 [01]</span><span class="tag">BOOT</span>&nbsp;&nbsp;v1.2.1 (build <span class="num">2026-08-26</span>) @ <span class="num">STM32F103VE</span></div>
+      <div><span class="ts">12:20:01.418 [06]</span><span class="tag">CLK</span>&nbsp;&nbsp;&nbsp;HSE <span class="num">8MHz</span> → PLL <span class="num">72MHz</span> ... <span class="lv-s">OK</span></div>
+      <div><span class="ts">12:20:01.425 [07]</span><span class="tag">SENSOR</span> MPU6050 init (addr <span class="num">0x68</span>) ... <span class="lv-s">OK</span></div>
+      <div><span class="ts">12:20:01.431 [06]</span><span class="lv-w">[WARN]</span> VBAT = <span class="num">3.12V</span>，低于安全阈值 <span class="num">3.30V</span></div>
+      <div><span class="ts">12:20:01.440 [09]</span><span class="tag">FLASH</span>&nbsp; 挂载 LittleFS @ <span class="num">0x08040000</span> (<span class="num">64KB</span>) ... <span class="lv-s">OK</span></div>
+      <div><span class="ts">12:20:01.452 [12]</span><span class="tag">NET</span>&nbsp;&nbsp;&nbsp; 未检测到网络模块，跳过初始化</div>
+      <div><span class="ts">12:20:01.460 [33]</span><span class="lv-e">[ERROR]</span> Flash 写入失败 @ <span class="num">0x08004A00</span> (HAL_FLASH_ERROR_WRP)</div>
+      <div><span class="ts">12:20:01.471 [11]</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;自动重试 <span class="num">1/3</span>，扇区已解锁</div>
+      <div><span class="ts">12:20:02.004 [43]</span><span class="lv-s">RDY</span>&nbsp;&nbsp; heap=<span class="num">42KB</span> stack=<span class="num">8KB</span> temp=<span class="num">36.5C</span> uptime=<span class="num">1.2s</span></div>
+      <div><span class="ts">12:20:02.115 [09]</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&gt; 收到命令 <span class="num">'status'</span></div>
+      <div><span class="ts">&nbsp;</span><span class="dim" style="font-size:10.5px;color:#5a6b8f">← [时间] 后的 [nn] 为分包字节数（超时 20ms 切包）· HEX 显示时按字节分组</span><span class="cur" style="margin-left:6px"></span></div>
+    </div>
+    <div class="send-bar" style="flex-wrap:wrap;row-gap:8px">
+      <input class="send-in" value="68 03 00 1A" style="flex:1 1 260px" placeholder="输入要发送的内容…">
+      <label class="chk"><input type="checkbox" checked><b>HEX 发送</b></label>
+      <label class="chk"><input type="checkbox" checked>回车换行</label>
+      <span class="opt-lbl">校验</span>
+      <select class="sel-sm"><option>None</option><option>SUM 累加和</option><option>CRC8</option><option>CRC16 MODBUS</option></select>
+      <span class="vline"></span>
+      <label class="chk"><input type="checkbox">定时发送</label>
+      <input class="mini-in" value="1000" style="width:64px"><span class="opt-lbl">ms/次</span>
+      <button class="btn-send">发送 ⏎</button>
+      <span class="send-hint">↑↓ 历史 · Ctrl+⏎ 发送</span>
+    </div>
+  </div>
+
+  <div class="side">
+    <div class="panel">
+      <h4>高亮规则</h4>
+      <div class="rule-row"><span class="rule-dot" style="background:var(--red)"></span><code>ERROR|FAIL|WRP</code><span class="cnt">×2</span></div>
+      <div class="rule-row"><span class="rule-dot" style="background:var(--amber)"></span><code>WARN</code><span class="cnt">×1</span></div>
+      <div class="rule-row"><span class="rule-dot" style="background:var(--green)"></span><code>OK|RDY|成功</code><span class="cnt">×3</span></div>
+      <div class="rule-row"><span class="rule-dot" style="background:var(--primary)"></span><code>0x[0-9A-Fa-f]{6,}</code><span class="cnt">×4</span></div>
+      <button class="add-rule">＋ 添加规则（支持正则，持久保存）</button>
+    </div>
+    <div class="panel">
+      <h4>会话统计</h4>
+      <div class="stats-grid">
+        <div class="stat"><div class="n">1,248</div><div class="t">总行数</div></div>
+        <div class="stat"><div class="n red">3</div><div class="t">ERROR</div></div>
+        <div class="stat"><div class="n yel">1</div><div class="t">WARN</div></div>
+        <div class="stat"><div class="n">182.4 KB</div><div class="t">RX 字节</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div></div>
+
+  <div class="status-bar">
+    <span class="okc">● 已连接</span><span>COM3 · 115200 8N1</span><span>RX 182.4 KB</span><span>行 1,248</span>
+    <span class="right">DTR ✓ &nbsp;RTS ✗ &nbsp;·&nbsp; BubbleLink CDC</span>
+  </div>
+</main>
+
+<script>
+const ind = document.getElementById('tabInd');
+const tabs = document.querySelectorAll('.tab:not(.disabled)');
+function moveInd(btn){ ind.style.left = btn.offsetLeft + 'px'; ind.style.width = btn.offsetWidth + 'px'; }
+tabs.forEach(btn => btn.addEventListener('click', () => {
+  tabs.forEach(b => b.classList.remove('active'));
+  btn.classList.add('active'); moveInd(btn);
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.getElementById('page-' + btn.dataset.page).classList.add('active');
+}));
+window.addEventListener('resize', () => moveInd(document.querySelector('.tab.active')));
+moveInd(document.querySelector('.tab.active'));
+const pbar = document.getElementById('pbar');
+setTimeout(() => pbar.style.width = '45.2%', 300);
+</script>
+</body>
+</html>
